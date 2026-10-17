@@ -29,7 +29,10 @@ DEFAULTS = {
                 "served": None, "served_contains": None,
                 "shutdown_start": r"Commencing graceful shutdown", "shutdown_done": r"Graceful shutdown complete",
                 "shutdown_aborted": r"Graceful shutdown aborted",
+                "app_start": None,  # only for "started" regexes without group 2: a line marking process start
                 "skip_containers": ["istio-proxy", "linkerd-proxy"]},
+    # Tried in order when the main "started" regex matches nothing in a namespace (e.g. another stack).
+    "signal_sets": [],
     "recommend": {"startup_period": 2, "readiness_period": 5, "margin": 1.5, "liveness_budget": 60, "prestop_sleep": 10},
 }
 
@@ -219,16 +222,39 @@ def collect(args, cfg):
 
     if env.get("loki"):
         sel = f'{{{ns_l}="{args.namespace}"' + "".join(f',{ct_l}!="{c}"' for c in skip) + "}"
-        if sig.get("started"):
-            rx = re.compile(sig["started"])
-            for pod, t, line in loki_lines(env, token, f"{sel} |~ `{sig['started']}`", start, end):
-                m = rx.search(line)
-                if m and pod in pods and "started_log" not in pods[pod]:
-                    pods[pod].update(started_log=t, app_s=float(m[2]), jvm_start=t - float(m[2]))
+        for cand in [sig] + [{**sig, **alt} for alt in cfg.get("signal_sets", [])]:
+            if cand.get("started") and started_lines(env, token, sel, cand, pods, start, end):
+                sig = cand
+                extra["signals"] = cand.get("name", "default")
+                break
         if args.served and sig.get("served"):
             first_served(env, token, sel, pod_l, sig, pods)
         extra["stops"] = shutdowns(env, token, sel, sig, start, end)
     return pods, probes, sd, extra
+
+
+def started_lines(env, token, sel, sig, pods, start, end):
+    """Fills started_log / app_s / jvm_start. Seconds since process start come from group 2 of `started`
+    (Spring: "process running for N") or, without it, from the first `app_start` line of the pod."""
+    rx = re.compile(sig["started"])
+    first_start = {}
+    if rx.groups < 2 and sig.get("app_start"):
+        for pod, t, _ in loki_lines(env, token, f"{sel} |~ `{sig['app_start']}`", start, end):
+            first_start.setdefault(pod, t)
+    hits = 0
+    for pod, t, line in loki_lines(env, token, f"{sel} |~ `{sig['started']}`", start, end):
+        m = rx.search(line)
+        if not m or pod not in pods or "started_log" in pods[pod]:
+            continue
+        if rx.groups >= 2:
+            app_s = float(m[2])
+        elif pod in first_start and first_start[pod] <= t:
+            app_s = t - first_start[pod]
+        else:
+            continue
+        pods[pod].update(started_log=t, app_s=app_s, jvm_start=t - app_s)
+        hits += 1
+    return hits
 
 
 def first_served(env, token, sel, pod_l, sig, pods):
@@ -290,6 +316,7 @@ def report(args, cfg, pods, probes, sd, extra):
         for k, v in p.get("probe_failures", {}).items():
             fails[k] = fails.get(k, 0) + v
     res = {"namespace": args.namespace, "env": args.env, "source": args.source, "pods": len(pods),
+           "signals": extra.get("signals"),
            "segments": {k: {"n": len(v), "p50": pct(v, .5), "p90": pct(v, .9), "p99": pct(v, .99)} for k, v in seg.items()},
            "current": {"probes": probes, "shutdown": sd}, "restarts": extra.get("restarts", 0), "probe_failures": fails,
            "shutdown_seen": len(stops), "shutdown_unfinished": sum(1 for s in stops.values() if s.get("start") and not s.get("done")),
@@ -305,7 +332,7 @@ def report(args, cfg, pods, probes, sd, extra):
 
 def markdown(r, scrape):
     f = lambda x: "—" if x is None else f"{x:.1f}"
-    out = [f"## {r['namespace']} ({r['env']}, {r['source']}): {r['pods']} new pods", "",
+    out = [f"## {r['namespace']} ({r['env']}, {r['source']}, signals: {r.get('signals') or 'none matched'}): {r['pods']} new pods", "",
            "| Segment | n | p50 (s) | p90 (s) | p99 (s) |", "|---|---|---|---|---|"]
     out += [f"| {k} | {v['n']} | {f(v['p50'])} | {f(v['p90'])} | {f(v['p99'])} |" for k, v in r["segments"].items() if v["n"]]
     if r["shutdown_seen"]:
@@ -391,6 +418,17 @@ def selftest():
                    {"a": {"start": 100.0, "done": 104.5}, "b": {"start": 100.0}})
     assert seg["created→scheduled"] == [2] and seg["app ready→Ready"] == [19] and seg["created→Ready"] == [40]
     assert seg["graceful shutdown"] == [4.5]
+    pods2 = {"p": {"created": 0.0}}
+    fake = {"app_start": [("p", 30.0, "> app@1.0 start"), ("p", 33.0, "> app@1.0 start")],
+            "started": [("p", 42.4, "ready at http://localhost:8080/x")]}
+    global loki_lines
+    real = loki_lines
+    loki_lines = lambda env, token, q, s, e, **k: fake["app_start" if "start`" in q and "ready" not in q else "started"]
+    try:
+        n = started_lines({}, "", "{}", {"started": r"ready at http", "app_start": r"> \S+@\S+ start"}, pods2, 0, 100)
+    finally:
+        loki_lines = real
+    assert n == 1 and abs(pods2["p"]["app_s"] - 12.4) < 1e-9 and pods2["p"]["jvm_start"] == 30.0, pods2
     print("selftest ok")
 
 

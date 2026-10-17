@@ -27,6 +27,19 @@ Python 3.11+, standard library only.
 | Running | restarts, probe failures | `livenessProbe` (kill budget vs GC pauses / throttling, timeout, same endpoint as readiness) |
 | Stop | graceful shutdown duration, shutdowns that never finished | `terminationGracePeriodSeconds` vs `preStop` + app shutdown timeout, missing `preStop` |
 
+## Signals for other stacks
+
+When the main "started" regex matches nothing in a namespace, the tool tries each `[[signal_sets]]` of the profile in order. A set can use two lines instead of one:
+- `app_start`: the line that marks process start;
+- `started`: the line that says the app is listening.
+
+```toml
+[[signal_sets]]
+name = "node-npm"
+started = 'listening on port [0-9]+'
+app_start = '> [^ ]+@[0-9][^ ]* start'
+```
+
 ## Sources
 
 All of them are optional. You only need the one that gives pod creation times.
