@@ -15,6 +15,10 @@ python3 probe_advisor.py ... --served          # also the first request each pod
 python3 probe_advisor.py ... --source kubectl  # exact timestamps + the real probe spec + Unhealthy events
 python3 probe_advisor.py ... --json            # for dashboards / CI
 python3 probe_advisor.py --selftest
+
+# fleet dashboard: one self-contained HTML from many --json reports
+for ns in svc-a svc-b svc-c; do python3 probe_advisor.py ... -n $ns --json > out/$ns.json; done
+python3 dashboard.py fleet.html out/*.json
 ```
 
 Python 3.11+, standard library only.
