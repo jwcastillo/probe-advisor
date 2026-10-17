@@ -1,0 +1,42 @@
+# probe-advisor profile. Copy it, point it at your Prometheus (kube-state-metrics) and Loki, set your deploy defaults.
+# The token is read from the environment variable named in token_env (never put it here).
+
+# What your deploy template sets when a service doesn't override it (used unless --source kubectl reads the real spec).
+[probes.startup]
+delay = 0
+period = 10
+timeout = 1
+failure = 3
+path = "/health/liveness"
+
+[probes.readiness]
+period = 10
+timeout = 1
+success = 1
+path = "/health/readiness"
+
+[probes.liveness]
+period = 10
+timeout = 1
+failure = 3
+path = "/health/liveness"
+
+[shutdown]
+grace = 30          # terminationGracePeriodSeconds
+prestop_sleep = 0   # preStop sleep, seconds
+app_timeout = 30    # e.g. Spring spring.lifecycle.timeout-per-shutdown-phase
+
+[signals]
+# Defaults fit Spring Boot. For other stacks set your own "I'm up" regex (group 2 = seconds since process start).
+# started = 'Started \S+ in ([0-9.]+) seconds \((?:process|JVM) running for ([0-9.]+)\)'
+# First served request (optional, --served): a line your app logs per request, and a cheap substring to pre-filter.
+# served = 'status=200'
+# served_contains = "status=200"
+
+[envs.prod]
+prometheus = "https://prometheus.example.com"      # anything speaking the Prometheus HTTP API (Grafana datasource proxy works)
+loki = "https://loki.example.com"
+token_env = "MONITORING_TOKEN"
+kube_context = "prod"
+loki_labels = { namespace = "namespace", pod = "pod", container = "container" }
+scrape_interval = 30
